@@ -1,0 +1,324 @@
+#!/bin/sh
+
+set -eu
+
+# TODO: support rotation
+
+usage="Usage: $(basename "$0") [--no-grid] [--no-group] [--extra-interleaved] src.pdf [out.pdf]"
+
+# ref: https://gist.github.com/deshion/10d3cb5f88a21671e17a
+no_grid=0
+no_group=0
+extra_interleaved=0
+while :; do
+    if [ $# -lt 1 ]; then
+        echo "$usage"
+        exit 1
+    fi
+    case $1 in
+    -h | -\? | --help)
+        echo "$usage"
+        exit
+        ;;
+    --no-grid)
+        no_grid=1
+        ;;
+    --no-group)
+        no_group=1
+        ;;
+    --extra-interleaved)
+        extra_interleaved=1
+        ;;
+    --)
+        shift
+        break
+        ;;
+    -?*)
+        echo "WARN: Unknown option (ignored): $1" >&2
+        ;;
+    *)
+        break
+        ;;
+    esac
+    shift
+done
+
+if [ $# -lt 1 ] || [ $# -gt 2 ]; then
+    echo "$usage"
+    exit 1
+fi
+
+input_pdf="$1"
+output_pdf="${input_pdf%.*}_note.pdf"
+output_pdf="${2:-$output_pdf}"
+
+# ref: https://unix.stackexchange.com/questions/520035/exit-trap-with-posix
+tmp_dir=$(mktemp -d)
+trap "rm -rf \"$tmp_dir\"; trap - EXIT; exit" EXIT INT HUP
+
+blank_ps="$tmp_dir/blank.ps"
+grid_ps="$tmp_dir/grid.ps"
+
+# ref: https://www.eamoncaddigan.net/posts/postscript-graph-paper/
+cat <<EOF >"$blank_ps"
+%!PS
+% Adjust these to suit your needs, units specified in "points" (1/72 inch)
+/w 595 def /h 842 def      % A4 paper
+
+% Page and line setup
+<< /PageSize [w h] >> setpagedevice
+EOF
+
+cat <<EOF >"$grid_ps"
+%!PS
+% Adjust these to suit your needs, units specified in "points" (1/72 inch)
+/w 595 def /h 842 def      % A4 paper
+/sp 5 72 mul 25.4 div def  % Grid spacing (5 mm here)
+/st 3.5 72 mul 300 div def % Dot radius (1 'dots' in a 300 dpi resolution)
+/co 0.83 def               % Gray-level of the line (0 = black, 1 = white)
+
+% Remainder function (mod doesn't take floating point values)
+/r {dup 3 1 roll div dup floor sub mul} def
+% Return the starting offset that centers the grid
+/o {r 2 div} def
+% Draw a dot (x y -- )
+/dot {st 0 360 arc closepath fill} def
+
+% Page and line setup
+<< /PageSize [w h] >> setpagedevice
+co setgray
+h sp o
+sp h
+{
+    w sp o
+    sp w
+    {
+        1 index     % (y x -- y x y)
+        dot         % (y x y -- y)
+    } for
+    pop
+} for
+EOF
+
+gs_default_opt='-q -dSAFER -dBATCH -dNOPAUSE'
+gs_pdfwrite_opt="$gs_default_opt -sDEVICE=pdfwrite -sColorConversionStrategy=RGB" # color conversion for cmyk pdf
+gs_pdfinfo_opt="$gs_default_opt -dNODISPLAY -dPDFINFO"
+
+blank_pdf="$tmp_dir/blank.pdf"
+gs $gs_pdfwrite_opt -sOutputFile="$blank_pdf" -f "$blank_ps"
+
+blank_info=$(gs $gs_pdfinfo_opt -f "$blank_pdf" 2>&1 | grep 'MediaBox')
+input_info=$(gs $gs_pdfinfo_opt -f "$input_pdf" 2>&1 | grep 'MediaBox')
+
+blank_width=$(echo "$blank_info" | grep 'Page 1 ' | awk -F '[][ ]' '{print $7}')
+blank_height=$(echo "$blank_info" | grep 'Page 1 ' | awk -F '[][ ]' '{print $8}')
+blank_ratio=$(echo "scale=10; $blank_height / $blank_width + 0.1" | bc) # 1.414 + 0.1 = 1.514, make 4:3 (0.75) grouped by 2
+# blank_ratio="2.0" # make 1:1 slides grouped by 2
+
+input_pages=$(qpdf --show-npages "$input_pdf")
+input_format="%0$(printf "$input_pages" | wc -m | tr -d ' ')d"
+
+if [ $no_group -eq 1 ]; then
+    group_overlay_pdf="$input_pdf"
+else
+    group_overlay_pdf="$tmp_dir/group_overlay.pdf"
+
+    work_dir="$tmp_dir/group_work"
+    mkdir "$work_dir"
+
+    qpdf --no-warn --warning-exit-0 --split-pages "$input_pdf" "$work_dir/page_%d.pdf"
+
+    current_ratio=0
+    page_start=1
+    page_end=-1
+    for page in $(seq 1 "$input_pages"); do
+        input_width=$(echo "$input_info" | grep "Page $page " | awk -F '[][ ]' '{print $7}')
+        input_height=$(echo "$input_info" | grep "Page $page " | awk -F '[][ ]' '{print $8}')
+        input_ratio=$(echo "scale=10; $input_height / $input_width" | bc)
+
+        if [ $(echo "$current_ratio + $input_ratio > $blank_ratio" | bc) -eq 1 ] && [ $(echo "$page_start <= $page_end" | bc) -eq 1 ]; then
+            # duplicated section: start
+            w_postfix="$(printf "$input_format" "$page_start")-$(printf "$input_format" "$page_end")"
+            w_dir="$work_dir/$w_postfix"
+            mkdir "$w_dir"
+
+            cur_ratio=0
+            max_width=0
+            max_width_page=0
+            for p in $(seq "$page_start" "$page_end"); do
+                in_fnum=$(printf "$input_format" "$p")
+                in_pdf="$work_dir/page_$in_fnum.pdf"
+                in_width=$(echo "$input_info" | grep "Page $p " | awk -F '[][ ]' '{print $7}')
+                in_height=$(echo "$input_info" | grep "Page $p " | awk -F '[][ ]' '{print $8}')
+                in_ratio=$(echo "scale=10; $in_height / $in_width" | bc)
+
+                # ref: https://superuser.com/questions/96058/pdf-manipulation-2-up-page-layout
+                print_width=$(echo "scale=10; $in_width * 10" | bc)
+                print_width=$(printf "%.0f" "$print_width")
+                print_height=$(echo "scale=10; $current_ratio * $in_width * 10" | bc)
+                print_height=$(printf "%.0f" "$print_height")
+                print_y_offset=$(echo "scale=10; $current_ratio * $in_width - $cur_ratio * $in_width - $in_height" | bc)
+
+                gs $gs_pdfwrite_opt -sOutputFile="$w_dir/$in_fnum.pdf" \
+                    -g"${print_width}x${print_height}" -c "<</PageOffset [0 ${print_y_offset}]>> setpagedevice" -f "$in_pdf"
+
+                echo "Page $in_fnum: size=${in_width}x${in_height} | print_size=$(echo "$print_width / 10" | bc)x$(echo "$print_height / 10" | bc) | print_offset=$(printf "%.0f" "$print_y_offset")" >&2
+
+                if [ $(echo "$in_width > $max_width" | bc) -eq 1 ]; then
+                    max_width="$in_width"
+                    max_width_page="$p"
+                fi
+
+                cur_ratio=$(echo "scale=10; $cur_ratio + $in_ratio" | bc)
+            done
+
+            go_pdf="$work_dir/group_overlay_$w_postfix.pdf"
+            cp "$w_dir/$(printf "$input_format" "$max_width_page").pdf" "$go_pdf"
+            for p in $(seq "$page_start" "$page_end"); do
+                if [ "$p" -eq "$max_width_page" ]; then
+                    continue
+                fi
+                qpdf "$go_pdf" --overlay "$w_dir/$(printf "$input_format" "$p").pdf" -- --replace-input
+            done
+            # duplicated section: end
+
+            current_ratio="$input_ratio"
+            page_start="$page"
+        else
+            current_ratio=$(echo "scale=10; $current_ratio + $input_ratio" | bc)
+        fi
+
+        page_end="$page"
+
+        # handle the rest
+        if [ "$page" -eq "$input_pages" ]; then
+            # duplicated section: start
+            w_postfix="$(printf "$input_format" "$page_start")-$(printf "$input_format" "$page_end")"
+            w_dir="$work_dir/$w_postfix"
+            mkdir "$w_dir"
+
+            cur_ratio=0
+            max_width=0
+            max_width_page=0
+            for p in $(seq "$page_start" "$page_end"); do
+                in_fnum=$(printf "$input_format" "$p")
+                in_pdf="$work_dir/page_$in_fnum.pdf"
+                in_width=$(echo "$input_info" | grep "Page $p " | awk -F '[][ ]' '{print $7}')
+                in_height=$(echo "$input_info" | grep "Page $p " | awk -F '[][ ]' '{print $8}')
+                in_ratio=$(echo "scale=10; $in_height / $in_width" | bc)
+
+                # ref: https://superuser.com/questions/96058/pdf-manipulation-2-up-page-layout
+                print_width=$(echo "scale=10; $in_width * 10" | bc)
+                print_width=$(printf "%.0f" "$print_width")
+                print_height=$(echo "scale=10; $current_ratio * $in_width * 10" | bc)
+                print_height=$(printf "%.0f" "$print_height")
+                print_y_offset=$(echo "scale=10; $current_ratio * $in_width - $cur_ratio * $in_width - $in_height" | bc)
+
+                gs $gs_pdfwrite_opt -sOutputFile="$w_dir/$in_fnum.pdf" \
+                    -g"${print_width}x${print_height}" -c "<</PageOffset [0 ${print_y_offset}]>> setpagedevice" -f "$in_pdf"
+
+                echo "Page $in_fnum: size=${in_width}x${in_height} | print_size=$(echo "$print_width / 10" | bc)x$(echo "$print_height / 10" | bc) | print_offset=$(printf "%.0f" "$print_y_offset")" >&2
+
+                if [ $(echo "$in_width > $max_width" | bc) -eq 1 ]; then
+                    max_width="$in_width"
+                    max_width_page="$p"
+                fi
+
+                cur_ratio=$(echo "scale=10; $cur_ratio + $in_ratio" | bc)
+            done
+
+            go_pdf="$work_dir/group_overlay_$w_postfix.pdf"
+            cp "$w_dir/$(printf "$input_format" "$max_width_page").pdf" "$go_pdf"
+            for p in $(seq "$page_start" "$page_end"); do
+                if [ "$p" -eq "$max_width_page" ]; then
+                    continue
+                fi
+                qpdf "$go_pdf" --overlay "$w_dir/$(printf "$input_format" "$p").pdf" -- --replace-input
+            done
+            # duplicated section: end
+        fi
+    done
+
+    qpdf --empty --pages "$work_dir/group_overlay_"*.pdf -- "$group_overlay_pdf"
+fi
+
+group_overlay_pages=$(qpdf --show-npages "$group_overlay_pdf")
+
+blank_range='1'
+for i in $(seq 2 "$group_overlay_pages"); do
+    blank_range="$blank_range,1"
+done
+
+group_pdf="$tmp_dir/group.pdf"
+qpdf --no-warn --warning-exit-0 --empty --pages "$blank_pdf" "$blank_range" -- --overlay "$group_overlay_pdf" -- "$group_pdf"
+
+blank_iratio=$(echo "scale=10; $blank_width / $blank_height" | bc)
+
+group_info=$(gs $gs_pdfinfo_opt -f "$group_pdf" 2>&1 | grep 'MediaBox')
+
+# after grouping, all same size
+group_width=$(echo "$group_info" | grep 'Page 1 ' | awk -F '[][ ]' '{print $7}')
+group_height=$(echo "$group_info" | grep 'Page 1 ' | awk -F '[][ ]' '{print $8}')
+group_iratio=$(echo "scale=10; $group_width / $group_height" | bc)
+
+total_iratio=$(echo "scale=10; $blank_iratio + $group_iratio" | bc)
+
+# ref: https://superuser.com/questions/96058/pdf-manipulation-2-up-page-layout
+right_pdf="$tmp_dir/right.pdf"
+right_width=$(echo "scale=10; $total_iratio * $blank_height * 10" | bc)
+right_width=$(printf "%.0f" "$right_width")
+right_height=$(echo "scale=10; $blank_height * 10" | bc)
+right_height=$(printf "%.0f" "$right_height")
+right_x_offset=$(echo "scale=10; $total_iratio * $blank_height - $blank_width" | bc)
+
+left_pdf="$tmp_dir/left.pdf"
+left_width=$(echo "scale=10; $total_iratio * $group_height * 10" | bc)
+left_width=$(printf "%.0f" "$left_width")
+left_height=$(echo "scale=10; $group_height * 10" | bc)
+left_height=$(printf "%.0f" "$right_height")
+left_x_offset=0
+
+gs $gs_pdfwrite_opt -sOutputFile="$right_pdf" \
+    -g"${right_width}x${right_height}" -c "<</PageOffset [${right_x_offset} 0]>> setpagedevice" -f "$blank_pdf"
+
+gs $gs_pdfwrite_opt -sOutputFile="$left_pdf" \
+    -g"${left_width}x${left_height}" -c "<</PageOffset [${left_x_offset} 0]>> setpagedevice" -f "$group_pdf"
+
+left_pages=$(qpdf --show-npages "$left_pdf")
+
+right_range='1'
+for i in $(seq 2 "$left_pages"); do
+    right_range="$right_range,1"
+done
+
+output_overlay_pdf="$tmp_dir/output_overlay.pdf"
+qpdf --empty --pages "$right_pdf" "$right_range" -- --overlay "$left_pdf" -- "$output_overlay_pdf"
+
+if [ $no_grid -eq 1 ]; then
+    grid_pdf="$blank_pdf"
+else
+    grid_pdf="$tmp_dir/grid.pdf"
+    gs $gs_pdfwrite_opt -sOutputFile="$grid_pdf" -f "$grid_ps"
+fi
+
+output_overlay_pages=$(qpdf --show-npages "$output_overlay_pdf")
+
+if [ $extra_interleaved -eq 0 ]; then
+    grid_range='1'
+else
+    grid_range='1,1'
+fi
+
+output_overlay_range='1'
+for i in $(seq 2 "$output_overlay_pages"); do
+    if [ $extra_interleaved -eq 0 ]; then
+        grid_range="$grid_range,1"
+        output_overlay_range="$output_overlay_range,$i"
+    else
+        grid_range="$grid_range,1,1"
+        output_overlay_range="$output_overlay_range,$(echo "2 * $i - 1" | bc)"
+    fi
+done
+
+qpdf --empty --pages "$grid_pdf" "$grid_range" -- --rotate=90 -- --flatten-rotation -- \
+    --overlay "$output_overlay_pdf" --to="$output_overlay_range" -- "$output_pdf"
