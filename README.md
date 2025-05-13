@@ -2,13 +2,16 @@
 
 **pdf2note** is a simple script that transforms your PDF documents—be it lecture notes, research papers, or books—into a 2-up layout specifically designed for enhanced note-taking.
 
-The script rearranges your PDF so that each page of the output displays the original PDF content on the left side and a dedicated blank space on the right. This layout is suitable for importing into note-taking applications like GoodNotes, Notability, or other similar platforms, allowing you to write, draw, or annotate directly alongside the source material.
+The script rearranges your PDF so that each page of the output displays the original PDF content on the left side and a dedicated blank space on the right.
+This layout is suitable for importing into note-taking applications like GoodNotes, Notability, or other similar platforms, allowing you to write, draw, or annotate directly alongside the source material.
 
 |       Input PDF (Any Size)        |        Output PDF (A4 Landscape)        |
 | :-------------------------------: | :-------------------------------------: |
 | ![Input PDF](./previews/demo.png) | ![Output PDF](./previews/demo_note.png) |
 
-## Requirements
+## Prerequisites
+
+Ensure that the `gs` (Ghostscript), `qpdf`, and `bc` commands are available in your system's PATH.
 
 ### Linux
 
@@ -48,6 +51,11 @@ Instead of grouping multiple pages to fit the size, ensure each output page cont
 ### `--extra-interleaved`
 
 After generating the initial output, this option adds extra blank pages between each existing page.
+This is particularly useful for creating additional note-taking space.
+
+## License
+
+This project is distributed under the MIT License. See the `LICENSE` file for more information.
 
 ## Source of Example Material
 
