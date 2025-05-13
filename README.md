@@ -4,7 +4,7 @@
 
 The script rearranges your PDF so that each page of the output displays the original PDF content on the left side and a dedicated blank space on the right. This layout is suitable for importing into note-taking applications like GoodNotes, Notability, or other similar platforms, allowing you to write, draw, or annotate directly alongside the source material.
 
-|             Input PDF             |               Output PDF                |
+|       Input PDF (Any Size)        |        Output PDF (A4 Landscape)        |
 | :-------------------------------: | :-------------------------------------: |
 | ![Input PDF](./previews/demo.png) | ![Output PDF](./previews/demo_note.png) |
 
@@ -51,4 +51,4 @@ After generating the initial output, this option adds extra blank pages between 
 
 ## Source of Example Material
 
-The example slides used in this documentation are from [polylux-typ/polylux](https://github.com/polylux-typ/polylux).
+The example slides used in this documentation are from [pmichaillat/latex-presentation](https://github.com/pmichaillat/latex-presentation).

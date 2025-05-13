@@ -55,10 +55,20 @@ tmp_dir=$(mktemp -d)
 trap "rm -rf \"$tmp_dir\"; trap - EXIT; exit" EXIT INT HUP
 
 blank_ps="$tmp_dir/blank.ps"
+grid_clear_ps="$tmp_dir/grid_clear.ps"
 grid_ps="$tmp_dir/grid.ps"
 
 # ref: https://www.eamoncaddigan.net/posts/postscript-graph-paper/
 cat <<EOF >"$blank_ps"
+%!PS
+% Adjust these to suit your needs, units specified in "points" (1/72 inch)
+/w 420 def /h 595 def      % A5 paper
+
+% Page and line setup
+<< /PageSize [w h] >> setpagedevice
+EOF
+
+cat <<EOF >"$grid_clear_ps"
 %!PS
 % Adjust these to suit your needs, units specified in "points" (1/72 inch)
 /w 595 def /h 842 def      % A4 paper
@@ -292,10 +302,10 @@ done
 output_overlay_pdf="$tmp_dir/output_overlay.pdf"
 qpdf --empty --pages "$right_pdf" "$right_range" -- --overlay "$left_pdf" -- "$output_overlay_pdf"
 
+grid_pdf="$tmp_dir/grid.pdf"
 if [ $no_grid -eq 1 ]; then
-    grid_pdf="$blank_pdf"
+    gs $gs_pdfwrite_opt -sOutputFile="$grid_pdf" -f "$grid_clear_ps"
 else
-    grid_pdf="$tmp_dir/grid.pdf"
     gs $gs_pdfwrite_opt -sOutputFile="$grid_pdf" -f "$grid_ps"
 fi
 
